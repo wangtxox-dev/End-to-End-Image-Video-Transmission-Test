@@ -22,11 +22,11 @@ import pandas as pd
 # 全局可视化配置区 (Control Panel)
 # ─────────────────────────────────────────────────────────────
 # 【开关】True: 仅绘制纯净版 Cliff 图; False: 叠加合作方的 JSCC Baseline 对比图
-ONLY_ORIGINAL_CLIFF = False
+ONLY_ORIGINAL_CLIFF = True
 
 # 【路径配置】
 # 注意：如果是 AV1 的脚本，通配符为 'sim_av1_data_*.pkl'；如果是 JPEG 脚本，必须改为 'sim_jpeg_data_*.pkl'
-PKL_PATTERN        = 'sim_jpeg_data_20260430_160802.pkl'
+PKL_PATTERN        = 'sim_jpeg_data_20260508_141331.pkl'
 PARTNER_EXCEL_PATH = '../NTSCC-fixCBR-SNR-SSIM.xlsx'  # Excel 文件放在 Semantic_Debug 根目录，请根据实际情况调整相对路径
 
 # ─────────────────────────────────────────────────────────────

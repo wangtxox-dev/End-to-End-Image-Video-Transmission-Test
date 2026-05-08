@@ -31,8 +31,8 @@ from pytorch_msssim import ms_ssim
 # 参数配置
 # ─────────────────────────────────────────────────────────────
 USE_IMAGE  = True                          # True: JPEG真实压缩; False: 随机比特
-G          = round(768 * 512 * 1.0152)    # 空口总比特数 (1179648)，Kodak 全分辨率
-RATES      = [1/16, 1/8, 1/4, 1/2, 2/3]  # 目标码率列表
+G          = round(768 * 512 * 2)    # 空口总比特数 (1179648)，Kodak 全分辨率
+RATES      = [1/64, 1/32, 1/16, 1/8, 1/4, 1/2]  # 目标码率列表
 KODAK_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kodak')
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))  # sim_awgn_worker.m 所在目录
 

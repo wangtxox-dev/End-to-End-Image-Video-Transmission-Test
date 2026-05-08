@@ -26,7 +26,7 @@ ONLY_ORIGINAL_CLIFF = True
 
 # 【路径配置】
 # 注意：使用通配符自动匹配最新的 pkl 存档
-PKL_PATTERN        = 'sim_av1_data_*.pkl'
+PKL_PATTERN        = 'sim_av1_data_20260508_141029.pkl'
 PARTNER_EXCEL_PATH = '../NTSCC-fixCBR-SNR-SSIM.xlsx'  # Excel 文件放在 Semantic_Debug 根目录
 
 # ─────────────────────────────────────────────────────────────
