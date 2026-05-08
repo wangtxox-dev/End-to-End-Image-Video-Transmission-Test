@@ -36,8 +36,8 @@ RATES      = [1/16, 1/8, 1/4, 1/2, 2/3]  # 目标码率列表
 KODAK_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kodak')
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))  # sim_awgn_worker.m 所在目录
 
-# ── 命令行参数：支持 --image kodim08.png 指定测试图片 ──────────
-# 用法: python run_sim.py --image kodim08.png
+# ── 命令行参数：支持 --image kodim01.png 指定测试图片 ──────────
+# 用法: python run_sim.py --image kodim01.png
 _TARGET_IMAGE = None
 for _i, _arg in enumerate(sys.argv[1:]):
     if _arg == '--image' and _i + 1 < len(sys.argv) - 1:
@@ -135,7 +135,7 @@ def get_tx_bits(R: float) -> tuple:
     if _TARGET_IMAGE:
         png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
     else:
-        png_files = sorted(glob.glob(os.path.join(KODAK_DIR, '*.png')))
+        png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim01.png')))
     if not png_files:
         raise FileNotFoundError(f"kodak 目录下没有 .png 文件: {KODAK_DIR}")
 
@@ -175,7 +175,7 @@ print("【前置探针】正在探测 JPEG 信源物理底线...")
 if _TARGET_IMAGE:
     _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
 else:
-    _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, '*.png')))
+    _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim01.png')))
 if not _png_files:
     raise FileNotFoundError(f"kodak 目录下没有 .png 文件: {KODAK_DIR}")
 print(f"  [探针] 目标图片: {os.path.basename(_png_files[0])}")

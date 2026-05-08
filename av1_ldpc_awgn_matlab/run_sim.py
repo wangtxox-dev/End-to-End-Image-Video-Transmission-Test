@@ -39,8 +39,8 @@ RATES      = [1/64, 1/36, 1/24, 1/16, 1/12, 1/8]          # 目标码率列表
 KODAK_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kodak')
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))  # sim_awgn_worker.m 所在目录
 
-# ── 命令行参数：支持 --image kodim08.png 指定测试图片 ──────────
-# 用法: python run_sim.py --image kodim08.png
+# ── 命令行参数：支持 --image kodim02.png 指定测试图片 ──────────
+# 用法: python run_sim.py --image kodim02.png
 _TARGET_IMAGE = None
 for _i, _arg in enumerate(sys.argv[1:]):
     if _arg == '--image' and _i + 1 < len(sys.argv) - 1:
@@ -147,9 +147,9 @@ def get_tx_bits(R: float) -> tuple[np.ndarray, object, int, int]:
     if _TARGET_IMAGE:
         png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
     else:
-        png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim08.png')))
+        png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim02.png')))
     if not png_files:
-        raise FileNotFoundError(f"kodak 目录下找不到指定图片: {KODAK_DIR}/{_TARGET_IMAGE or 'kodim08.png'}")
+        raise FileNotFoundError(f"kodak 目录下找不到指定图片: {KODAK_DIR}/{_TARGET_IMAGE or 'kodim02.png'}")
 
     # 取第一张图做代表（评估悬崖效应，单张即可），直接读取原图全分辨率
     img = Image.open(png_files[0]).convert('RGB')
@@ -186,7 +186,7 @@ print("【前置探针】正在探测 AVIF 信源物理底线...")
 if _TARGET_IMAGE:
     _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
 else:
-    _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim08.png')))
+    _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim02.png')))
 if not _png_files:
     raise FileNotFoundError(f"kodak 目录下找不到指定图片: {KODAK_DIR}")
 print(f"  [探针] 目标图片: {os.path.basename(_png_files[0])}")

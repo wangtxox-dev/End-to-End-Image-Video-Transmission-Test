@@ -1,6 +1,7 @@
 # === 用户特定排除项 ===
 image_final_ldpc/
 venv.nosync/
+sync_step.txt
 
 # === 仿真数据与结果 (建议不上传，防止仓库体积爆炸) ===
 *.pkl
