@@ -30,6 +30,7 @@ from pytorch_msssim import ms_ssim
 # ─────────────────────────────────────────────────────────────
 # 参数配置
 # ─────────────────────────────────────────────────────────────
+DEFAULT_IMAGE = 'kodim02.png'          # 默认测试图片名 (当命令行不指定时使用)
 USE_IMAGE  = True                          # True: JPEG真实压缩; False: 随机比特
 G          = round(768 * 512 * 2)    # 空口总比特数 (1179648)，Kodak 全分辨率
 RATES      = [1/64, 1/32, 1/16, 1/8, 1/4, 1/2]  # 目标码率列表
@@ -38,7 +39,7 @@ WORKER_DIR = os.path.dirname(os.path.abspath(__file__))  # sim_awgn_worker.m 所
 
 # ── 命令行参数：支持 --image kodim01.png 指定测试图片 ──────────
 # 用法: python run_sim.py --image kodim01.png
-_TARGET_IMAGE = None
+_TARGET_IMAGE = DEFAULT_IMAGE
 for _i, _arg in enumerate(sys.argv[1:]):
     if _arg == '--image' and _i + 1 < len(sys.argv) - 1:
         _TARGET_IMAGE = sys.argv[_i + 2]
@@ -132,10 +133,7 @@ def get_tx_bits(R: float) -> tuple:
     if not USE_IMAGE:
         return np.random.randint(0, 2, K, dtype=np.int32), None, -1, K
 
-    if _TARGET_IMAGE:
-        png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
-    else:
-        png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim01.png')))
+    png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
     if not png_files:
         raise FileNotFoundError(f"kodak 目录下没有 .png 文件: {KODAK_DIR}")
 
@@ -172,10 +170,7 @@ print("MATLAB Engine 启动成功。\n")
 print("=" * 60)
 print("【前置探针】正在探测 JPEG 信源物理底线...")
 
-if _TARGET_IMAGE:
-    _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
-else:
-    _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim01.png')))
+_png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
 if not _png_files:
     raise FileNotFoundError(f"kodak 目录下没有 .png 文件: {KODAK_DIR}")
 print(f"  [探针] 目标图片: {os.path.basename(_png_files[0])}")

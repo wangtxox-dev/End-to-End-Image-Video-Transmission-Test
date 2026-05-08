@@ -31,21 +31,24 @@ from pytorch_msssim import ms_ssim
 # ─────────────────────────────────────────────────────────────
 # 参数配置
 # ─────────────────────────────────────────────────────────────
-USE_IMAGE  = True                              # True: AVIF 真实压缩; False: 随机比特
-G          = 768 * 512 * 2                     # 空口总比特数 (786432)，Kodak 全分辨率
-RATES      = [1/64, 1/32, 1/16, 1/8, 1/4, 1/2]          # 目标码率列表
+USE_IMAGE     = True                              # True: AVIF 真实压缩; False: 随机比特
+G             = 768 * 512 * 2                     # 空口总比特数 (786432)，Kodak 全分辨率
+RATES         = [1/64, 1/32, 1/16, 1/8, 1/4, 1/2]          # 目标码率列表
 # G          = round(768 * 512 * 1.0152)                     # 空口总比特数 (1179648)，Kodak 全分辨率
 # RATES      = [1/64, 1/16, 1/12, 1/8]          # 目标码率列表
-KODAK_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kodak')
-WORKER_DIR = os.path.dirname(os.path.abspath(__file__))  # sim_awgn_worker.m 所在目录
+KODAK_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kodak')
+WORKER_DIR    = os.path.dirname(os.path.abspath(__file__))  # sim_awgn_worker.m 所在目录
+DEFAULT_IMAGE = 'kodim05.png'          # 默认测试图片名
+AVIF_SPEED    = 4                      # AVIF 编码速度 (0-10，数值越大越快但压缩率略低)
 
-# ── 命令行参数：支持 --image kodim01.png 指定测试图片 ──────────
-# 用法: python run_sim.py --image kodim01.png
+# ── 命令行参数：支持 --image kodim08.png 指定测试图片 ──────────
+# 用法: python run_sim.py --image kodim08.png
 _TARGET_IMAGE = None
 for _i, _arg in enumerate(sys.argv[1:]):
     if _arg == '--image' and _i + 1 < len(sys.argv) - 1:
         _TARGET_IMAGE = sys.argv[_i + 2]
         break
+IMAGE_TO_USE = _TARGET_IMAGE if _TARGET_IMAGE else DEFAULT_IMAGE
 
 # ─────────────────────────────────────────────────────────────
 # 扰码器（Scrambler）— Python 侧实施，对 MATLAB 物理层完全透明
@@ -116,7 +119,7 @@ def avif_bisect(img_pil: Image.Image, target_bits: int) -> tuple[bytes, int]:
     while lo <= hi:
         mid = (lo + hi) // 2
         buf = io.BytesIO()
-        img_pil.save(buf, format='AVIF', quality=mid, speed=4)
+        img_pil.save(buf, format='AVIF', quality=mid, speed=AVIF_SPEED)
         size_bits = buf.tell() * 8
         if size_bits <= target_bits:
             best_buf = buf.getvalue()  # 满足约束，记录并尝试更高质量
@@ -127,7 +130,7 @@ def avif_bisect(img_pil: Image.Image, target_bits: int) -> tuple[bytes, int]:
     # 若 quality=0 仍超出（极低码率），退而求其次取最低质量
     if best_buf is None:
         buf = io.BytesIO()
-        img_pil.save(buf, format='AVIF', quality=0, speed=4)
+        img_pil.save(buf, format='AVIF', quality=0, speed=AVIF_SPEED)
         best_buf = buf.getvalue()
         best_quality = 0
     return best_buf, best_quality
@@ -144,12 +147,9 @@ def get_tx_bits(R: float) -> tuple[np.ndarray, object, int, int]:
     if not USE_IMAGE:
         return np.random.randint(0, 2, K, dtype=np.int32), None, -1, K
 
-    if _TARGET_IMAGE:
-        png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
-    else:
-        png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim01.png')))
+    png_files = sorted(glob.glob(os.path.join(KODAK_DIR, IMAGE_TO_USE)))
     if not png_files:
-        raise FileNotFoundError(f"kodak 目录下找不到指定图片: {KODAK_DIR}/{_TARGET_IMAGE or 'kodim01.png'}")
+        raise FileNotFoundError(f"kodak 目录下找不到指定图片: {KODAK_DIR}/{IMAGE_TO_USE}")
 
     # 取第一张图做代表（评估悬崖效应，单张即可），直接读取原图全分辨率
     img = Image.open(png_files[0]).convert('RGB')
@@ -183,10 +183,7 @@ print("MATLAB Engine 启动成功。\n")
 print("=" * 60)
 print("【前置探针】正在探测 AVIF 信源物理底线...")
 
-if _TARGET_IMAGE:
-    _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, _TARGET_IMAGE)))
-else:
-    _png_files = sorted(glob.glob(os.path.join(KODAK_DIR, 'kodim01.png')))
+_png_files = sorted(glob.glob(os.path.join(KODAK_DIR, IMAGE_TO_USE)))
 if not _png_files:
     raise FileNotFoundError(f"kodak 目录下找不到指定图片: {KODAK_DIR}")
 print(f"  [探针] 目标图片: {os.path.basename(_png_files[0])}")
@@ -194,11 +191,11 @@ _probe_img = Image.open(_png_files[0]).convert('RGB')
 
 # 使用 quality=0, speed=4 进行无约束最低画质压缩，获取绝对最小字节数
 _buf_min = io.BytesIO()
-_probe_img.save(_buf_min, format='AVIF', quality=0, speed=4)
+_probe_img.save(_buf_min, format='AVIF', quality=0, speed=AVIF_SPEED)
 K_min = _buf_min.tell() * 8          # 绝对最小比特数
 R_min = K_min / G                    # 绝对物理极限码率
 
-print(f"  AVIF quality=0,speed=4 最小压缩: K_min={K_min} bits, R_min={R_min:.6f} (≈1/{round(1/R_min)})")
+print(f"  AVIF quality=0,speed={AVIF_SPEED} 最小压缩: K_min={K_min} bits, R_min={R_min:.6f} (≈1/{round(1/R_min)})")
 print("=" * 60)
 
 # 洗牌与去重：构建有效码率列表
