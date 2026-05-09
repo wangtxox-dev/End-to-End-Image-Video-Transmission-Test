@@ -1,7 +1,8 @@
 """
-run_sim.py  —  JSCC 悬崖效应 (Cliff Effect) 仿真引擎
-架构：Python 负责信源编解码与评估，MATLAB 负责 5G NR 物理层传输
+run_sim.py  —  JSCC 悬崖效应 (Cliff Effect) 仿真引擎 [OFDM + TDL-C 版]
+架构：Python 负责信源编解码与评估，MATLAB 负责 5G NR OFDM 物理层传输
 信源编码格式：AV1 / AVIF
+信道模型：OFDM + TDL-C 多径衰落信道 + 完美信道估计 (Perfect CSI) + MMSE 均衡
 
 运行完毕后，仿真数据将以 pickle 格式落盘，供 plot_results.py 读取出图。
 
@@ -33,11 +34,13 @@ from pytorch_msssim import ms_ssim
 # ─────────────────────────────────────────────────────────────
 USE_IMAGE     = True                              # True: AVIF 真实压缩; False: 随机比特
 G             = 768 * 512 * 2                     # 空口总比特数 (786432)，Kodak 全分辨率
-RATES         = [1/64, 1/32, 1/16, 1/8, 1/4, 1/2]          # 目标码率列表
+RATES         = [1/32, 1/16, 1/8, 1/4]          # 目标码率列表
 # G          = round(768 * 512 * 1.0152)                     # 空口总比特数 (1179648)，Kodak 全分辨率
 # RATES      = [1/64, 1/16, 1/12, 1/8]          # 目标码率列表
-KODAK_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kodak')
-WORKER_DIR    = os.path.dirname(os.path.abspath(__file__))  # sim_awgn_worker.m 所在目录
+
+# kodak 文件夹已移动到 Semantic_Debug 根目录，使用绝对路径定位
+WORKER_DIR    = os.path.dirname(os.path.abspath(__file__))  # sim_ofdm_worker.m 所在目录
+KODAK_DIR     = os.path.abspath(os.path.join(WORKER_DIR, '../kodak'))
 DEFAULT_IMAGE = 'kodim01.png'          # 默认测试图片名
 AVIF_SPEED    = 4                      # AVIF 编码速度 (0-10，数值越大越快但压缩率略低)
 
@@ -230,8 +233,9 @@ for R in valid_rates:
     bpp     = K / (768 * 512)   # = R * 3，基于 Kodak 全分辨率像素数
     snr_lim = calc_shannon_limit_dB(R, Q=2)
 
-    # SNR 扫频范围：[极限-5, 极限+5]，步进 0.5 dB
-    snr_array = np.arange(snr_lim - 5.0, snr_lim + 5.0 + 1e-9, 0.5)
+    # SNR 扫频范围：[极限-5, 极限+12]，步进 0.5 dB
+    # OFDM+TDL-C 衰落信道下悬崖点比 AWGN 高，需要更大的扫频范围
+    snr_array = np.arange(snr_lim - 5.0, snr_lim + 12.0 + 1e-9, 0.5)
 
     frac_str = format_rate(R)
     print(f"{'='*60}")
@@ -261,7 +265,8 @@ for R in valid_rates:
     y_max           = 0.0   # 将由首次 ber==0 时的实测 MS-SSIM 填充
 
     for snr in snr_array:
-        ber, rx_bits_ml = eng.sim_awgn_worker(tx_bits_ml, float(R), float(G), float(snr),
+        # ── 调用 OFDM 物理层 worker ──────────────────────────────
+        ber, rx_bits_ml = eng.sim_ofdm_worker(tx_bits_ml, float(R), float(G), float(snr),
                                               nargout=2)
         ber = float(ber)
 
@@ -298,7 +303,7 @@ for R in valid_rates:
                 if not saved_this_rate and ref_img is not None:
                     rate_tag  = f"R{format_rate_file(R)}"
                     snr_tag   = f"{snr:.1f}"
-                    save_name = f"recovered_{rate_tag}_SNR_{snr_tag}.png"
+                    save_name = f"recovered_ofdm_{rate_tag}_SNR_{snr_tag}.png"
                     save_path = os.path.join(WORKER_DIR, save_name)
                     img_rec.save(save_path)
                     print(f"  [存图] 恢复图已保存: {save_name}  Quality={quality}")
@@ -331,7 +336,7 @@ print("\n仿真结束，MATLAB Engine 仍在后台待命。")
 # 数据落盘：将仿真结果序列化为 pickle 文件
 # ─────────────────────────────────────────────────────────────
 timestamp_str = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-pkl_filename  = f"sim_av1_data_{timestamp_str}.pkl"
+pkl_filename  = f"sim_av1_ofdm_data_{timestamp_str}.pkl"
 pkl_path      = os.path.join(WORKER_DIR, pkl_filename)
 
 payload = {
