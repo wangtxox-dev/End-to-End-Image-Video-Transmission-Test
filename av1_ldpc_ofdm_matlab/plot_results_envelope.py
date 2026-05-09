@@ -26,7 +26,7 @@ ONLY_ORIGINAL_CLIFF = True
 
 # 【路径配置】
 # 自动匹配最新的 OFDM 仿真 pkl 存档
-PKL_PATTERN        = 'sim_av1_ofdm_data_*.pkl'
+PKL_PATTERN        = 'sim_av1_ofdm_data_20260509_161059.pkl'
 PARTNER_EXCEL_PATH = '../NTSCC-fixCBR-SNR-SSIM.xlsx'  # Excel 文件放在 Semantic_Debug 根目录
 
 # ─────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ import io
 import os
 import sys
 import glob
+import json
 import pickle
 import datetime
 import numpy as np
@@ -30,11 +31,29 @@ import torch
 from pytorch_msssim import ms_ssim
 
 # ─────────────────────────────────────────────────────────────
+# 预加载 TDL-C 容量曲线（由 build_capacity_curve.py 生成）
+# ─────────────────────────────────────────────────────────────
+_CURVE_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "tdlc_capacity_curve.json")
+if not os.path.exists(_CURVE_JSON):
+    raise FileNotFoundError(
+        f"找不到 TDL-C 容量曲线缓存文件：{_CURVE_JSON}\n"
+        "请先运行以下命令生成该文件：\n"
+        "  venv.nosync/bin/python av1_ldpc_ofdm_matlab/build_capacity_curve.py"
+    )
+with open(_CURVE_JSON, "r", encoding="utf-8") as _f:
+    _curve_data = json.load(_f)
+_CURVE_SNR_DB   = np.array(_curve_data["snr_db"],   dtype=np.float64)
+_CURVE_CAPACITY = np.array(_curve_data["capacity"], dtype=np.float64)
+print(f"[容量曲线] 已预加载 {len(_CURVE_SNR_DB)} 个数据点，"
+      f"SNR 范围 [{_CURVE_SNR_DB[0]:.1f}, {_CURVE_SNR_DB[-1]:.1f}] dB。")
+
+# ─────────────────────────────────────────────────────────────
 # 参数配置
 # ─────────────────────────────────────────────────────────────
 USE_IMAGE     = True                              # True: AVIF 真实压缩; False: 随机比特
 G             = 768 * 512 * 2                     # 空口总比特数 (786432)，Kodak 全分辨率
-RATES         = [1/32, 1/16, 1/8, 1/4]          # 目标码率列表
+RATES         = [1/64, 1/32, 1/16, 1/8, 1/4, 1/2]          # 目标码率列表
 # G          = round(768 * 512 * 1.0152)                     # 空口总比特数 (1179648)，Kodak 全分辨率
 # RATES      = [1/64, 1/16, 1/12, 1/8]          # 目标码率列表
 
@@ -106,9 +125,19 @@ def img_to_tensor(img_pil: Image.Image) -> torch.Tensor:
 
 
 def calc_shannon_limit_dB(R: float, Q: int = 2) -> float:
-    """严格对齐 calc_shannon_limit.m: snr_limit_linear = 2^(R*Q) - 1"""
+    """严格对齐 calc_shannon_limit.m: snr_limit_linear = 2^(R*Q) - 1（AWGN 参考，保留备用）"""
     snr_linear = 2 ** (R * Q) - 1
     return 10.0 * np.log10(snr_linear)
+
+
+def calc_tdlc_limit_dB(R: float) -> float:
+    """利用预加载的 TDL-C 容量曲线，通过一维线性插值求 SNR 极限（dB）。
+    目标容量 target_cap = R * 2.0（QPSK 每符号 2 bit）。
+    以 _CURVE_CAPACITY 为 X 轴，_CURVE_SNR_DB 为 Y 轴做 numpy.interp 插值。
+    无需 MATLAB 调用，毫秒级返回。
+    """
+    target_cap = R * 2.0   # QPSK：每符号 2 bit，目标容量 = R*2
+    return float(np.interp(target_cap, _CURVE_CAPACITY, _CURVE_SNR_DB))
 
 
 def avif_bisect(img_pil: Image.Image, target_bits: int) -> tuple[bytes, int]:
@@ -231,15 +260,20 @@ for R in valid_rates:
 
     K       = int(G * R)
     bpp     = K / (768 * 512)   # = R * 3，基于 Kodak 全分辨率像素数
-    snr_lim = calc_shannon_limit_dB(R, Q=2)
 
-    # SNR 扫频范围：[极限-5, 极限+12]，步进 0.5 dB
-    # OFDM+TDL-C 衰落信道下悬崖点比 AWGN 高，需要更大的扫频范围
-    snr_array = np.arange(snr_lim - 5.0, snr_lim + 12.0 + 1e-9, 0.5)
+    # ── TDL-C 遍历容量极限（替换 AWGN 香农极限）─────────────────
+    # 通过二分搜索找到 C_tdlc(snr) = R*2 时的 SNR，作为真实信道容量限
+    print(f"  [TDL-C 容量] 正在查表插值码率 R={format_rate(R)} 的 TDL-C 遍历容量极限...")
+    snr_lim = calc_tdlc_limit_dB(R)
+    snr_lim_awgn = calc_shannon_limit_dB(R, Q=2)   # 保留 AWGN 参考值，仅用于对比显示
+
+    # SNR 扫频范围：[TDL-C极限-2, TDL-C极限+9]，步进 0.5 dB
+    snr_array = np.arange(snr_lim - 2.0, snr_lim + 9.0 + 1e-9, 0.5)
 
     frac_str = format_rate(R)
     print(f"{'='*60}")
-    print(f"码率 R={frac_str}  bpp={bpp:.4f}  K={K}  香农极限={snr_lim:.2f} dB"
+    print(f"码率 R={frac_str}  bpp={bpp:.4f}  K={K}  "
+          f"TDL-C容量极限={snr_lim:.2f} dB  (AWGN参考={snr_lim_awgn:.2f} dB)"
           + ("  [底板极限]" if is_floor else ""))
     print(f"SNR 扫频: [{snr_array[0]:.1f}, {snr_array[-1]:.1f}] dB  步进 0.5 dB")
     print(f"{'='*60}")
@@ -315,7 +349,8 @@ for R in valid_rates:
 
             if not cliff_reported and y > 0:
                 print(f"  [报捷] 码率={frac_str} | bpp={bpp:.4f} | "
-                      f"香农极限={snr_lim:.2f} dB | "
+                      f"TDL-C容量极限={snr_lim:.2f} dB | "
+                      f"AWGN参考={snr_lim_awgn:.2f} dB | "
                       f"临界SNR={snr:.1f} dB | "
                       f"Quality={quality} | "
                       f"实测 MS-SSIM={y:.6f}")
@@ -326,7 +361,8 @@ for R in valid_rates:
         print(f"  SNR={snr:+6.1f} dB | BER={ber:.2e} | MS-SSIM={y:.4f}")
 
     results[R] = {'snr_list': snr_list, 'ssim_list': ssim_list,
-                  'snr_lim': snr_lim, 'bpp': bpp, 'y_max': y_max,
+                  'snr_lim': snr_lim, 'snr_lim_awgn': snr_lim_awgn,
+                  'bpp': bpp, 'y_max': y_max,
                   'is_floor': is_floor, 'quality': quality}
 
 # eng.quit()  # 绝对不要 quit，留着下次秒连！

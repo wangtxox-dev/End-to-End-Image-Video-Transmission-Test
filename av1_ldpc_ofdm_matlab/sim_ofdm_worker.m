@@ -49,6 +49,13 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     txSym           = nrSymbolModulate(txRM_vec, modType);
     numSym          = length(txSym);   % = G/2
 
+    % ── 发射端符号级交织 ──────────────────────────────────────
+    % 固定种子 rng(42)，生成随机置换索引，打散符号顺序
+    % 目的：将连片深度衰落分散到不同 LDPC 码字位置，增强纠错能力
+    rng(42);
+    intrlv_idx = randperm(numSym);
+    txSym_intrlv = txSym(intrlv_idx);   % 打乱后的符号序列
+
     % ── OFDM 配置 ─────────────────────────────────────────────
     carrier = nrCarrierConfig;
     carrier.SubcarrierSpacing = 30;   % 30 kHz SCS (mu=1)
@@ -62,9 +69,9 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     numSlots   = ceil(numSym / (numDataSC * symPerSlot));
     numOFDMSym = numSlots * symPerSlot;
 
-    % 构建资源网格
+    % 构建资源网格（使用交织后的符号）
     txGrid = zeros(numDataSC, numOFDMSym, 1);
-    txSym_padded = [txSym; zeros(numDataSC * numOFDMSym - numSym, 1)];
+    txSym_padded = [txSym_intrlv; zeros(numDataSC * numOFDMSym - numSym, 1)];
     txGrid(:, :, 1) = reshape(txSym_padded, numDataSC, numOFDMSym);
 
     % OFDM 调制
@@ -79,7 +86,7 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     % 消除 ICI 和信道老化，建立理想块衰落（Block Fading）上限。
     channel = nrTDLChannel;
     channel.DelayProfile        = 'TDL-C';
-    channel.DelaySpread         = 300e-9;
+    channel.DelaySpread         = 100e-9;
     channel.MaximumDopplerShift = 0;       % 绝对静止，消除多普勒
     channel.SampleRate          = sampleRate;
     channel.NumTransmitAntennas = 1;
@@ -153,9 +160,21 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     csi_vec      = csi_vec(1:numSym_avail);
 
     if numSym_avail < numSym
+        % 语义修复：补零兜底的符号对应位置 CSI 置 0（绝对不可信），
+        % 而非 1，避免将伪造符号当作高可靠信息送入 LDPC 解码器
         rxSym_vec = [rxSym_vec; zeros(numSym - numSym_avail, 1)];
-        csi_vec   = [csi_vec;   ones(numSym - numSym_avail, 1)];
+        csi_vec   = [csi_vec;   zeros(numSym - numSym_avail, 1)];
     end
+
+    % ── 接收端符号级解交织 ────────────────────────────────────
+    % 使用完全相同的种子 rng(42) 重建置换索引，计算反向索引还原原始顺序
+    rng(42);
+    intrlv_idx_rx = randperm(numSym);
+    deintrlv_idx  = zeros(1, numSym);
+    deintrlv_idx(intrlv_idx_rx) = 1:numSym;   % 反向索引
+
+    rxSym_vec = rxSym_vec(deintrlv_idx);   % 还原符号顺序
+    csi_vec   = csi_vec(deintrlv_idx);     % 同步还原 CSI 顺序
 
     % ── QPSK 软解调 ────────────────────────────────────────────
     % 使用 noiseVar=1，后续由 CSI scaling 控制软信息可靠性
