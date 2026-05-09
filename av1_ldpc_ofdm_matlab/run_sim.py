@@ -55,7 +55,7 @@ USE_IMAGE     = True                              # True: AVIF 真实压缩; Fal
 G             = 768 * 512 * 2                     # 空口总比特数 (786432)，Kodak 全分辨率
 RATES         = [1/64, 1/32, 1/16, 1/8, 1/4, 1/2]          # 目标码率列表
 # G          = round(768 * 512 * 1.0152)                     # 空口总比特数 (1179648)，Kodak 全分辨率
-# RATES      = [1/64, 1/16, 1/12, 1/8]          # 目标码率列表
+# RATES      = [1/64, 1/16, 1/8, 1/4, 1/2, 2/3]          # 目标码率列表
 
 # kodak 文件夹已移动到 Semantic_Debug 根目录，使用绝对路径定位
 WORKER_DIR    = os.path.dirname(os.path.abspath(__file__))  # sim_ofdm_worker.m 所在目录
