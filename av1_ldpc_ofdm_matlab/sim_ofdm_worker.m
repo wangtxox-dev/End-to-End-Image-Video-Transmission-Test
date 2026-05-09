@@ -96,10 +96,25 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     % 只通过信道一次，得到衰落后的时域波形
     rxWaveform_faded = channel(txWaveform);
 
-    % ── 步骤1：时域加噪（允许用 measured）────────────────────
-    rxWaveform_noisy = awgn(rxWaveform_faded, snr_dB, 'measured');
+    % ── 步骤1：建立绝对底噪基准（发端对齐）──────────────────
+    % 发射端 QPSK 符号能量期望 = 1.0（nrSymbolModulate 归一化输出）
+    % 频域噪声方差直接由输入 snr_dB 决定，与接收信号功率无关
+    snr_linear = 10^(snr_dB / 10);
+    noiseVar   = 1.0 / snr_linear;   % 频域每子载波噪声方差
 
-    % ── 步骤2：解调出纯净网格和含噪网格 ──────────────────────
+    % ── 步骤2：时域精确加噪（补偿 nrOFDMModulate 的 FFT 缩放）─
+    % nrOFDMModulate 内部执行 IFFT 并除以 sqrt(Nfft)，
+    % 使时域信号能量 = 频域能量 / Nfft。
+    % 根据 Parseval 定理，时域噪声方差需同步缩小 Nfft 倍，
+    % 才能保证解调后频域噪声方差 = noiseVar。
+    Nfft     = double(ofdmInfo.Nfft);
+    N0_time  = noiseVar / Nfft;      % 时域复高斯噪声方差（每维 N0_time/2）
+
+    noise_time = (randn(size(rxWaveform_faded)) + ...
+                  1j * randn(size(rxWaveform_faded))) * sqrt(N0_time / 2);
+    rxWaveform_noisy = rxWaveform_faded + noise_time;
+
+    % ── 步骤3：解调出纯净网格和含噪网格 ──────────────────────
     rxGrid_clean = nrOFDMDemodulate(carrier, rxWaveform_faded);
     rxGrid_noisy = nrOFDMDemodulate(carrier, rxWaveform_noisy);
 
@@ -109,16 +124,9 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     txGrid_2d       = txGrid(:, 1:nCols_use, 1);
     rxGrid_clean_2d = rxGrid_clean(:, 1:nCols_use, 1);
 
-    % ── 步骤3：提取有效数据的 Mask ────────────────────────────
+    % ── 步骤4：提取有效数据的 Mask ────────────────────────────
     nonzero_mask = abs(txGrid_2d) > 1e-10;
-
-    % ── 步骤4：计算纯净频域数据子载波的真实信号方差 ──────────
-    % 使用 var() 而非 mean(|.|²)，排除均值偏移（QPSK 均值=0，两者等价）
-    sigPower_freq = mean(abs(rxGrid_clean_2d(nonzero_mask)).^2);
-
-    % ── 步骤5：倒推最精准的频域 noiseVar ─────────────────────
-    snr_linear = 10^(snr_dB / 10);
-    noiseVar   = sigPower_freq / snr_linear;
+    % noiseVar 已在步骤1确定，无需从接收信号反推，直接用于后续均衡
 
     % ── 完美信道估计：H = rxGrid_clean / txGrid ───────────────
     H_perfect    = zeros(numDataSC, nCols_use);
