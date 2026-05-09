@@ -206,3 +206,4 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     [~, ber] = biterr(txBits, rxBits);
     rx_bits  = int32(rxBits(:));
 end
+
