@@ -42,7 +42,7 @@ from pytorch_msssim import ms_ssim
 parser = argparse.ArgumentParser(description="JSCC 悬崖效应仿真引擎 [OFDM 版]")
 parser.add_argument("--channel", type=str, default="TDL-C",
                     help="信道模型，如 AWGN、TDL-C、TDL-D")
-parser.add_argument("--ds", type=float, default=100e-9,
+parser.add_argument("--ds", type=float, default=300e-9,
                     help="时延扩展（秒），AWGN 时忽略")
 parser.add_argument("--image", type=str, default="kodim01.png",
                     help="指定测试图片名，如 kodim08.png")
@@ -63,22 +63,30 @@ else:
     ds_ns = int(round(DELAY_SPREAD * 1e9))
     _CURVE_JSON = os.path.join(SCRIPT_DIR, f"capacity_curve_{CHANNEL_MODEL}_{ds_ns}ns.json")
 
-if not os.path.exists(_CURVE_JSON):
-    raise FileNotFoundError(
-        f"找不到信道容量曲线缓存文件：{_CURVE_JSON}\n"
-        "请先运行以下命令生成该文件：\n"
-        f"  venv.nosync/bin/python av1_ldpc_ofdm_matlab/build_capacity_curve.py "
-        f"--channel {CHANNEL_MODEL}"
-        + (f" --ds {DELAY_SPREAD}" if CHANNEL_MODEL != "AWGN" else "")
-    )
+_YELLOW = "\033[33m"
+_RESET  = "\033[0m"
 
-with open(_CURVE_JSON, "r", encoding="utf-8") as _f:
-    _curve_data = json.load(_f)
-_CURVE_SNR_DB   = np.array(_curve_data["snr_db"],   dtype=np.float64)
-_CURVE_CAPACITY = np.array(_curve_data["capacity"], dtype=np.float64)
-print(f"[容量曲线] 已预加载 {len(_CURVE_SNR_DB)} 个数据点，"
-      f"SNR 范围 [{_CURVE_SNR_DB[0]:.1f}, {_CURVE_SNR_DB[-1]:.1f}] dB。"
-      f"  信道: {CHANNEL_MODEL}")
+_CURVE_LOADED = False
+_CURVE_SNR_DB   = None
+_CURVE_CAPACITY = None
+
+if os.path.exists(_CURVE_JSON):
+    with open(_CURVE_JSON, "r", encoding="utf-8") as _f:
+        _curve_data = json.load(_f)
+    _CURVE_SNR_DB   = np.array(_curve_data["snr_db"],   dtype=np.float64)
+    _CURVE_CAPACITY = np.array(_curve_data["capacity"], dtype=np.float64)
+    _CURVE_LOADED   = True
+    print(f"[容量曲线] 已预加载 {len(_CURVE_SNR_DB)} 个数据点，"
+          f"SNR 范围 [{_CURVE_SNR_DB[0]:.1f}, {_CURVE_SNR_DB[-1]:.1f}] dB。"
+          f"  信道: {CHANNEL_MODEL}")
+else:
+    print(f"{_YELLOW}[警告] 找不到信道容量曲线缓存文件：{_CURVE_JSON}\n"
+          f"       将使用 AWGN 香农极限作为扫频备用起点（物理保底，安全降级）。\n"
+          f"       如需精确极限，请先运行：\n"
+          f"         venv.nosync/bin/python av1_ldpc_ofdm_matlab/build_capacity_curve.py "
+          f"--channel {CHANNEL_MODEL}"
+          + (f" --ds {DELAY_SPREAD}" if CHANNEL_MODEL != "AWGN" else "")
+          + f"{_RESET}")
 
 # ─────────────────────────────────────────────────────────────
 # 参数配置
@@ -152,7 +160,10 @@ def calc_shannon_limit_dB(R: float, Q: int = 2) -> float:
 def calc_channel_limit_dB(R: float) -> float:
     """利用预加载的容量曲线，通过一维线性插值求 SNR 极限（dB）。
     目标容量 target_cap = R * 2.0（QPSK 每符号 2 bit）。
+    仅在 _CURVE_LOADED=True 时可调用，否则返回 None。
     """
+    if not _CURVE_LOADED:
+        return None
     target_cap = R * 2.0
     return float(np.interp(target_cap, _CURVE_CAPACITY, _CURVE_SNR_DB))
 
@@ -262,19 +273,26 @@ for R in valid_rates:
     K   = int(G * R)
     bpp = K / (768 * 512)
 
-    # ── 信道容量极限（通过预加载曲线插值）────────────────────
-    print(f"  [信道容量] 正在查表插值码率 R={format_rate(R)} 的容量极限...")
-    snr_lim      = calc_channel_limit_dB(R)
-    snr_lim_awgn = calc_shannon_limit_dB(R, Q=2)   # AWGN 参考值，仅用于对比显示
+    # ── 信道容量极限（通过预加载曲线插值，或降级为 AWGN 保底）──
+    snr_lim_awgn = calc_shannon_limit_dB(R, Q=2)   # AWGN 香农极限，物理绝对下限
 
-    # ── 算力优化：SNR 扫频严格从理论极限起步 ─────────────────
-    # 砍掉极限以下的无效扫频点，节省算力
-    snr_array = np.arange(snr_lim, snr_lim + 6, 0.5)
+    if _CURVE_LOADED:
+        print(f"  [信道容量] 正在查表插值码率 R={format_rate(R)} 的容量极限...")
+        snr_lim     = calc_channel_limit_dB(R)      # float，当前信道真实极限
+        snr_lim_str = f"{snr_lim:.2f}"              # 安全字符串，用于 print
+        scan_start  = snr_lim                       # 从真实极限起步
+    else:
+        snr_lim     = None                          # 无缓存，极限未知
+        snr_lim_str = "N/A"                         # 安全字符串，用于 print
+        scan_start  = snr_lim_awgn                  # 降级：AWGN 极限作为物理保底起点
+
+    # ── 动态扫频：统一从 scan_start 起步，覆盖 6 dB 窗口 ──────
+    snr_array = np.arange(scan_start, scan_start + 6, 0.5)
 
     frac_str = format_rate(R)
     print(f"{'='*60}")
     print(f"码率 R={frac_str}  bpp={bpp:.4f}  K={K}  "
-          f"[当前信道容量极限]={snr_lim:.2f} dB  (AWGN参考={snr_lim_awgn:.2f} dB)"
+          f"[当前信道容量极限]={snr_lim_str} dB  (AWGN参考={snr_lim_awgn:.2f} dB)"
           + ("  [底板极限]" if is_floor else ""))
     print(f"SNR 扫频: [{snr_array[0]:.1f}, {snr_array[-1]:.1f}] dB  步进 0.5 dB")
     print(f"{'='*60}")
@@ -338,7 +356,7 @@ for R in valid_rates:
 
             if not cliff_reported and y > 0:
                 print(f"  [报捷] 码率={frac_str} | bpp={bpp:.4f} | "
-                      f"[当前信道容量极限]={snr_lim:.2f} dB | "
+                      f"[当前信道容量极限]={snr_lim_str} dB | "
                       f"AWGN参考={snr_lim_awgn:.2f} dB | "
                       f"临界SNR={snr:.1f} dB | "
                       f"Quality={quality} | "
@@ -350,7 +368,8 @@ for R in valid_rates:
         print(f"  SNR={snr:+6.1f} dB | BER={ber:.2e} | MS-SSIM={y:.4f}")
 
     results[R] = {'snr_list': snr_list, 'ssim_list': ssim_list,
-                  'snr_lim': snr_lim, 'snr_lim_awgn': snr_lim_awgn,
+                  'snr_lim': snr_lim,           # float 或 None（降级时）
+                  'snr_lim_awgn': snr_lim_awgn,
                   'bpp': bpp, 'y_max': y_max,
                   'is_floor': is_floor, 'quality': quality}
 

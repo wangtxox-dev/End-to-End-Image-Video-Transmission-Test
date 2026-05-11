@@ -6,6 +6,7 @@ sync_step.txt
 # === 仿真数据与结果 (建议不上传，防止仓库体积爆炸) ===
 *.pkl
 *.json
+capacity_curve_TDL-C_100ns.json
 
 # === Python 环境与缓存 ===
 __pycache__/
