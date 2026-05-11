@@ -41,11 +41,11 @@ from pytorch_msssim import ms_ssim
 # ── 命令行参数解析 ─────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="JSCC 悬崖效应仿真引擎 [OFDM 版]")
 parser.add_argument("--channel", type=str, default="TDL-C",
-                    help="信道模型，如 AWGN、TDL-C、TDL-D（默认：TDL-C）")
+                    help="信道模型，如 AWGN、TDL-C、TDL-D")
 parser.add_argument("--ds", type=float, default=100e-9,
-                    help="时延扩展（秒），AWGN 时忽略（默认：100e-9）")
+                    help="时延扩展（秒），AWGN 时忽略")
 parser.add_argument("--image", type=str, default="kodim01.png",
-                    help="指定测试图片名，如 kodim08.png（默认：kodim01.png）")
+                    help="指定测试图片名，如 kodim08.png")
 args = parser.parse_args()
 
 CHANNEL_MODEL = args.channel

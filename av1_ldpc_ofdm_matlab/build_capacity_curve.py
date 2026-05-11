@@ -32,9 +32,9 @@ import numpy as np
 # ── 命令行参数解析 ─────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="预计算信道遍历容量曲线")
 parser.add_argument("--channel", type=str, default="TDL-C",
-                    help="信道模型，如 AWGN、TDL-C、TDL-D（默认：TDL-C）")
+                    help="信道模型，如 AWGN、TDL-C、TDL-D")
 parser.add_argument("--ds", type=float, default=100e-9,
-                    help="时延扩展（秒），AWGN 时忽略（默认：100e-9）")
+                    help="时延扩展（秒），AWGN 时忽略")
 args = parser.parse_args()
 
 CHANNEL_MODEL = args.channel
