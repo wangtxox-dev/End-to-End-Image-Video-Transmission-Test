@@ -1,19 +1,28 @@
-function C = calc_tdlc_capacity(snr_dB)
-% calc_tdlc_capacity  通过蒙特卡洛仿真计算 TDL-C 信道的平均遍历容量
+function C = calc_channel_capacity(snr_dB, channelModel, delaySpread)
+% calc_channel_capacity  通用信道遍历容量计算函数
 %
-% 信道参数：TDL-C, DelaySpread=100ns, MaximumDopplerShift=0（块衰落）
-% 仿真次数：1000 次独立信道实现
-% 容量公式：C = mean(log2(1 + |H|^2 * SNR_linear))
+% 支持信道模型：
+%   'AWGN'      — 直接套用香农公式，极速返回
+%   'TDL-*'     — 通过 1000 次蒙特卡洛仿真计算遍历容量
 %
 % 输入:
-%   snr_dB  - 信噪比 (dB)，标量
+%   snr_dB       - 信噪比 (dB)，标量
+%   channelModel - 信道模型字符串，如 'AWGN'、'TDL-C'、'TDL-D' 等
+%   delaySpread  - 时延扩展 (秒)，AWGN 时忽略，如 100e-9
 %
 % 输出:
-%   C       - TDL-C 遍历容量 (bits/s/Hz)，标量
-
-    numMC = 1000;   % 蒙特卡洛次数
+%   C            - 遍历容量 (bits/s/Hz)，标量
 
     snr_linear = 10^(snr_dB / 10);
+
+    % ── AWGN 快速路径 ────────────────────────────────────────────
+    if strcmp(channelModel, 'AWGN')
+        C = mean(log2(1 + 10.^(snr_dB / 10)));
+        return;
+    end
+
+    % ── TDL-* 蒙特卡洛路径 ───────────────────────────────────────
+    numMC = 1000;   % 蒙特卡洛次数
 
     % ── OFDM 载波配置（与 sim_ofdm_worker.m 保持一致）──────────
     carrier = nrCarrierConfig;
@@ -26,17 +35,16 @@ function C = calc_tdlc_capacity(snr_dB)
     numOFDMSym = symPerSlot;               % 单 slot 足够采样信道
 
     % ── 构造一个全1参考网格（用于提取 H）──────────────────────
-    % 发送全1 QPSK 符号（幅度1），方便直接用 rxGrid_clean/txGrid 得到 H
     txGrid_ref = ones(numDataSC, numOFDMSym, 1);
 
     ofdmInfo   = nrOFDMInfo(carrier);
     sampleRate = ofdmInfo.SampleRate;
 
-    % ── TDL-C 信道配置 ──────────────────────────────────────────
+    % ── TDL 信道配置（按传入参数动态设置）──────────────────────
     channel = nrTDLChannel;
-    channel.DelayProfile        = 'TDL-C';
-    channel.DelaySpread         = 100e-9;
-    channel.MaximumDopplerShift = 0;       % 块衰落，与 worker 一致
+    channel.DelayProfile        = channelModel;   % 如 'TDL-C'、'TDL-D'
+    channel.DelaySpread         = delaySpread;    % 如 100e-9
+    channel.MaximumDopplerShift = 0;              % 块衰落，与 worker 一致
     channel.SampleRate          = sampleRate;
     channel.NumTransmitAntennas = 1;
     channel.NumReceiveAntennas  = 1;
@@ -62,7 +70,7 @@ function C = calc_tdlc_capacity(snr_dB)
         txGrid_2d = txGrid_ref(:, 1:nCols, 1);
 
         % 完美信道估计：H = rxGrid_clean / txGrid（txGrid 全1，直接取 rxGrid）
-        H = rxGrid_2d ./ txGrid_2d;   % txGrid_ref 全1，等价于直接取 rxGrid_2d
+        H = rxGrid_2d ./ txGrid_2d;
 
         % 遍历容量：C = mean(log2(1 + |H|^2 * SNR))
         cap_mc = mean(mean(log2(1 + abs(H).^2 * snr_linear)));

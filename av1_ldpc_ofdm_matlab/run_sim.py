@@ -1,8 +1,9 @@
 """
-run_sim.py  —  JSCC 悬崖效应 (Cliff Effect) 仿真引擎 [OFDM + TDL-C 版]
+run_sim.py  —  JSCC 悬崖效应 (Cliff Effect) 仿真引擎 [OFDM 版]
 架构：Python 负责信源编解码与评估，MATLAB 负责 5G NR OFDM 物理层传输
 信源编码格式：AV1 / AVIF
-信道模型：OFDM + TDL-C 多径衰落信道 + 完美信道估计 (Perfect CSI) + MMSE 均衡
+信道模型：由 --channel / --ds 参数决定（AWGN 或 TDL-* 多径衰落）
+信道估计：完美信道估计 (Perfect CSI) + MMSE 均衡
 
 运行完毕后，仿真数据将以 pickle 格式落盘，供 plot_results.py 读取出图。
 
@@ -11,10 +12,17 @@ run_sim.py  —  JSCC 悬崖效应 (Cliff Effect) 仿真引擎 [OFDM + TDL-C 版
   原因：MATLAB 链路为标准 5G NR 物理层（nrCRCEncode→nrLDPCEncode），
   在其内部插入扰码会破坏 CRC 语义完整性；Python 侧加扰对物理层完全透明，
   且扰码序列由固定种子 PRNG 生成，收发两端绝对一致，符合 3GPP 数据扰码规范。
+
+用法示例：
+    venv.nosync/bin/python av1_ldpc_ofdm_matlab/run_sim.py
+    venv.nosync/bin/python av1_ldpc_ofdm_matlab/run_sim.py --channel TDL-C --ds 100e-9
+    venv.nosync/bin/python av1_ldpc_ofdm_matlab/run_sim.py --channel AWGN
+    venv.nosync/bin/python av1_ldpc_ofdm_matlab/run_sim.py --image kodim08.png
 """
 
 # matlab.engine.shareEngine('JSCC_Engine')
 
+import argparse
 import io
 import os
 import sys
@@ -30,23 +38,47 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 import torch
 from pytorch_msssim import ms_ssim
 
+# ── 命令行参数解析 ─────────────────────────────────────────────
+parser = argparse.ArgumentParser(description="JSCC 悬崖效应仿真引擎 [OFDM 版]")
+parser.add_argument("--channel", type=str, default="TDL-C",
+                    help="信道模型，如 AWGN、TDL-C、TDL-D（默认：TDL-C）")
+parser.add_argument("--ds", type=float, default=100e-9,
+                    help="时延扩展（秒），AWGN 时忽略（默认：100e-9）")
+parser.add_argument("--image", type=str, default="kodim01.png",
+                    help="指定测试图片名，如 kodim08.png（默认：kodim01.png）")
+args = parser.parse_args()
+
+CHANNEL_MODEL = args.channel
+DELAY_SPREAD  = args.ds
+
 # ─────────────────────────────────────────────────────────────
-# 预加载 TDL-C 容量曲线（由 build_capacity_curve.py 生成）
+# 预加载信道容量曲线（由 build_capacity_curve.py 生成）
 # ─────────────────────────────────────────────────────────────
-_CURVE_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "tdlc_capacity_curve.json")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 根据信道参数动态确定 JSON 文件名
+if CHANNEL_MODEL == "AWGN":
+    _CURVE_JSON = os.path.join(SCRIPT_DIR, "capacity_curve_AWGN.json")
+else:
+    ds_ns = int(round(DELAY_SPREAD * 1e9))
+    _CURVE_JSON = os.path.join(SCRIPT_DIR, f"capacity_curve_{CHANNEL_MODEL}_{ds_ns}ns.json")
+
 if not os.path.exists(_CURVE_JSON):
     raise FileNotFoundError(
-        f"找不到 TDL-C 容量曲线缓存文件：{_CURVE_JSON}\n"
+        f"找不到信道容量曲线缓存文件：{_CURVE_JSON}\n"
         "请先运行以下命令生成该文件：\n"
-        "  venv.nosync/bin/python av1_ldpc_ofdm_matlab/build_capacity_curve.py"
+        f"  venv.nosync/bin/python av1_ldpc_ofdm_matlab/build_capacity_curve.py "
+        f"--channel {CHANNEL_MODEL}"
+        + (f" --ds {DELAY_SPREAD}" if CHANNEL_MODEL != "AWGN" else "")
     )
+
 with open(_CURVE_JSON, "r", encoding="utf-8") as _f:
     _curve_data = json.load(_f)
 _CURVE_SNR_DB   = np.array(_curve_data["snr_db"],   dtype=np.float64)
 _CURVE_CAPACITY = np.array(_curve_data["capacity"], dtype=np.float64)
 print(f"[容量曲线] 已预加载 {len(_CURVE_SNR_DB)} 个数据点，"
-      f"SNR 范围 [{_CURVE_SNR_DB[0]:.1f}, {_CURVE_SNR_DB[-1]:.1f}] dB。")
+      f"SNR 范围 [{_CURVE_SNR_DB[0]:.1f}, {_CURVE_SNR_DB[-1]:.1f}] dB。"
+      f"  信道: {CHANNEL_MODEL}")
 
 # ─────────────────────────────────────────────────────────────
 # 参数配置
@@ -54,35 +86,22 @@ print(f"[容量曲线] 已预加载 {len(_CURVE_SNR_DB)} 个数据点，"
 USE_IMAGE     = True                              # True: AVIF 真实压缩; False: 随机比特
 G             = 768 * 512 * 2                     # 空口总比特数 (786432)，Kodak 全分辨率
 RATES         = [1/64, 1/32, 1/16, 1/8, 1/4, 1/2]          # 目标码率列表
-# G          = round(768 * 512 * 1.0152)                     # 空口总比特数 (1179648)，Kodak 全分辨率
-# RATES      = [1/64, 1/16, 1/8, 1/4, 1/2, 2/3]          # 目标码率列表
 
 # kodak 文件夹已移动到 Semantic_Debug 根目录，使用绝对路径定位
-WORKER_DIR    = os.path.dirname(os.path.abspath(__file__))  # sim_ofdm_worker.m 所在目录
+WORKER_DIR    = SCRIPT_DIR                              # sim_ofdm_worker.m 所在目录
 KODAK_DIR     = os.path.abspath(os.path.join(WORKER_DIR, '../kodak'))
 DEFAULT_IMAGE = 'kodim01.png'          # 默认测试图片名
 AVIF_SPEED    = 4                      # AVIF 编码速度 (0-10，数值越大越快但压缩率略低)
 
-# ── 命令行参数：支持 --image kodim08.png 指定测试图片 ──────────
-# 用法: python run_sim.py --image kodim08.png
-_TARGET_IMAGE = None
-for _i, _arg in enumerate(sys.argv[1:]):
-    if _arg == '--image' and _i + 1 < len(sys.argv) - 1:
-        _TARGET_IMAGE = sys.argv[_i + 2]
-        break
-IMAGE_TO_USE = _TARGET_IMAGE if _TARGET_IMAGE else DEFAULT_IMAGE
+IMAGE_TO_USE = args.image if args.image else DEFAULT_IMAGE
 
 # ─────────────────────────────────────────────────────────────
 # 扰码器（Scrambler）— Python 侧实施，对 MATLAB 物理层完全透明
 # ─────────────────────────────────────────────────────────────
-# 扰码种子固定为 42，保证收发两端序列绝对一致。
-# 使用独立的 np.random.Generator 实例，不污染全局随机状态。
 _SCRAMBLE_SEED = 42
 
 def make_scramble_seq(length: int) -> np.ndarray:
-    """生成长度为 length 的伪随机扰码序列（0/1 int32 数组）。
-    每次调用使用相同种子，保证收发一致性。
-    """
+    """生成长度为 length 的伪随机扰码序列（0/1 int32 数组）。"""
     rng = np.random.default_rng(_SCRAMBLE_SEED)
     return rng.integers(0, 2, size=length, dtype=np.int32)
 
@@ -95,14 +114,14 @@ def scramble(bits: np.ndarray) -> np.ndarray:
 
 def descramble(bits: np.ndarray) -> np.ndarray:
     """对比特流做 XOR 解扰（XOR 自逆，与加扰操作完全相同）。"""
-    return scramble(bits)  # XOR 自逆
+    return scramble(bits)
 
 
 # ─────────────────────────────────────────────────────────────
 # 工具函数
 # ─────────────────────────────────────────────────────────────
 def format_rate(r: float) -> str:
-    """将浮点码率精确转为分数字符串，修复非1分子的Bug。"""
+    """将浮点码率精确转为分数字符串。"""
     frac = Fraction(r).limit_denominator(10000)
     if frac.denominator > 1000:
         return f"{r:.4f}"
@@ -120,31 +139,26 @@ def format_rate_file(r: float) -> str:
 def img_to_tensor(img_pil: Image.Image) -> torch.Tensor:
     """PIL Image → (1, C, H, W) float32 tensor in [0,1]"""
     arr = np.array(img_pil).astype(np.float32) / 255.0
-    t   = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)  # (1,3,H,W)
+    t   = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
     return t
 
 
 def calc_shannon_limit_dB(R: float, Q: int = 2) -> float:
-    """严格对齐 calc_shannon_limit.m: snr_limit_linear = 2^(R*Q) - 1（AWGN 参考，保留备用）"""
+    """AWGN 香农极限（保留备用）"""
     snr_linear = 2 ** (R * Q) - 1
     return 10.0 * np.log10(snr_linear)
 
 
-def calc_tdlc_limit_dB(R: float) -> float:
-    """利用预加载的 TDL-C 容量曲线，通过一维线性插值求 SNR 极限（dB）。
+def calc_channel_limit_dB(R: float) -> float:
+    """利用预加载的容量曲线，通过一维线性插值求 SNR 极限（dB）。
     目标容量 target_cap = R * 2.0（QPSK 每符号 2 bit）。
-    以 _CURVE_CAPACITY 为 X 轴，_CURVE_SNR_DB 为 Y 轴做 numpy.interp 插值。
-    无需 MATLAB 调用，毫秒级返回。
     """
-    target_cap = R * 2.0   # QPSK：每符号 2 bit，目标容量 = R*2
+    target_cap = R * 2.0
     return float(np.interp(target_cap, _CURVE_CAPACITY, _CURVE_SNR_DB))
 
 
 def avif_bisect(img_pil: Image.Image, target_bits: int) -> tuple[bytes, int]:
-    """二分查找严格不超过 target_bits 的最高 AVIF quality，返回 (二进制流, quality)。
-    quality 范围 0-100（数值越大质量越高、文件越大，与 JPEG 一致）。
-    使用 speed=4 加速编码。
-    """
+    """二分查找严格不超过 target_bits 的最高 AVIF quality。"""
     lo, hi = 0, 100
     best_buf = None
     best_quality = 0
@@ -154,12 +168,11 @@ def avif_bisect(img_pil: Image.Image, target_bits: int) -> tuple[bytes, int]:
         img_pil.save(buf, format='AVIF', quality=mid, speed=AVIF_SPEED)
         size_bits = buf.tell() * 8
         if size_bits <= target_bits:
-            best_buf = buf.getvalue()  # 满足约束，记录并尝试更高质量
+            best_buf = buf.getvalue()
             best_quality = mid
             lo = mid + 1
         else:
-            hi = mid - 1              # 超出约束，必须降低质量
-    # 若 quality=0 仍超出（极低码率），退而求其次取最低质量
+            hi = mid - 1
     if best_buf is None:
         buf = io.BytesIO()
         img_pil.save(buf, format='AVIF', quality=0, speed=AVIF_SPEED)
@@ -169,12 +182,7 @@ def avif_bisect(img_pil: Image.Image, target_bits: int) -> tuple[bytes, int]:
 
 
 def get_tx_bits(R: float) -> tuple[np.ndarray, object, int, int]:
-    """根据 USE_IMAGE 开关获取信源比特流，同时返回原始 PIL Image 作为 GT 参考。
-    返回: (bits: np.ndarray shape=(K,) int32, ref_img: PIL.Image or None, quality: int, actual_source_len: int)
-
-    生死防线：AVIF 是 ISOBMFF 容器格式，绝对禁止用切片 [:K] 截断比特流！
-    若压缩后比特数 < K，用 np.pad 在尾部补零填满 K。
-    """
+    """根据 USE_IMAGE 开关获取信源比特流。"""
     K = int(G * R)
     if not USE_IMAGE:
         return np.random.randint(0, 2, K, dtype=np.int32), None, -1, K
@@ -183,18 +191,15 @@ def get_tx_bits(R: float) -> tuple[np.ndarray, object, int, int]:
     if not png_files:
         raise FileNotFoundError(f"kodak 目录下找不到指定图片: {KODAK_DIR}/{IMAGE_TO_USE}")
 
-    # 取第一张图做代表（评估悬崖效应，单张即可），直接读取原图全分辨率
     img = Image.open(png_files[0]).convert('RGB')
     print(f"  [图片] 使用: {os.path.basename(png_files[0])}")
     avif_bytes, quality = avif_bisect(img, K)
 
     bits = np.unpackbits(np.frombuffer(avif_bytes, dtype=np.uint8))
-    actual_source_len = len(bits)  # 记录 np.pad 补零之前的真实 AV1 压缩长度
+    actual_source_len = len(bits)
 
     if actual_source_len < K:
-        # 尾部补零填满 K —— 绝对不能截断 ISOBMFF 容器！
         bits = np.pad(bits, (0, K - actual_source_len), mode='constant')
-    # actual_source_len > K 理论上不会发生（bisect 保证 <= target_bits），无需处理
 
     bits = bits.astype(np.int32)
     return bits, img, quality, actual_source_len
@@ -221,17 +226,15 @@ if not _png_files:
 print(f"  [探针] 目标图片: {os.path.basename(_png_files[0])}")
 _probe_img = Image.open(_png_files[0]).convert('RGB')
 
-# 使用 quality=0, speed=4 进行无约束最低画质压缩，获取绝对最小字节数
 _buf_min = io.BytesIO()
 _probe_img.save(_buf_min, format='AVIF', quality=0, speed=AVIF_SPEED)
-K_min = _buf_min.tell() * 8          # 绝对最小比特数
-R_min = K_min / G                    # 绝对物理极限码率
+K_min = _buf_min.tell() * 8
+R_min = K_min / G
 
 print(f"  AVIF quality=0,speed={AVIF_SPEED} 最小压缩: K_min={K_min} bits, R_min={R_min:.6f} (≈1/{round(1/R_min)})")
 print("=" * 60)
 
-# 洗牌与去重：构建有效码率列表
-ORANGE = "\033[33m"  # 终端橙色/黄色
+ORANGE = "\033[33m"
 RESET  = "\033[0m"
 
 valid_rates = []
@@ -245,78 +248,66 @@ for R in RATES:
               f"强制校准为实际极限 R_min≈{frac_min} (K={K_min}){RESET}")
         valid_rates.append(R_min)
 
-# 去重并按从大到小排序
 valid_rates = sorted(list(set(valid_rates)), reverse=True)
 print(f"有效码率列表（去重后）: {[format_rate(r) for r in valid_rates]}\n")
 
 # ─────────────────────────────────────────────────────────────
 # 主循环：遍历有效码率，动态 SNR 扫频
 # ─────────────────────────────────────────────────────────────
-results = {}   # {R: {'snr_list': [...], 'ssim_list': [...], 'is_floor': bool}}
+results = {}
 
 for R in valid_rates:
-    # 判断该码率是否为底板校准产生的极限码率
     is_floor = (R == R_min) and (R_min not in RATES)
 
-    K       = int(G * R)
-    bpp     = K / (768 * 512)   # = R * 3，基于 Kodak 全分辨率像素数
+    K   = int(G * R)
+    bpp = K / (768 * 512)
 
-    # ── TDL-C 遍历容量极限（替换 AWGN 香农极限）─────────────────
-    # 通过二分搜索找到 C_tdlc(snr) = R*2 时的 SNR，作为真实信道容量限
-    print(f"  [TDL-C 容量] 正在查表插值码率 R={format_rate(R)} 的 TDL-C 遍历容量极限...")
-    snr_lim = calc_tdlc_limit_dB(R)
-    snr_lim_awgn = calc_shannon_limit_dB(R, Q=2)   # 保留 AWGN 参考值，仅用于对比显示
+    # ── 信道容量极限（通过预加载曲线插值）────────────────────
+    print(f"  [信道容量] 正在查表插值码率 R={format_rate(R)} 的容量极限...")
+    snr_lim      = calc_channel_limit_dB(R)
+    snr_lim_awgn = calc_shannon_limit_dB(R, Q=2)   # AWGN 参考值，仅用于对比显示
 
-    # SNR 扫频范围：[TDL-C极限-2, TDL-C极限+9]，步进 0.5 dB
-    snr_array = np.arange(snr_lim - 2.0, snr_lim + 9.0 + 1e-9, 0.5)
+    # ── 算力优化：SNR 扫频严格从理论极限起步 ─────────────────
+    # 砍掉极限以下的无效扫频点，节省算力
+    snr_array = np.arange(snr_lim, snr_lim + 6, 0.5)
 
     frac_str = format_rate(R)
     print(f"{'='*60}")
     print(f"码率 R={frac_str}  bpp={bpp:.4f}  K={K}  "
-          f"TDL-C容量极限={snr_lim:.2f} dB  (AWGN参考={snr_lim_awgn:.2f} dB)"
+          f"[当前信道容量极限]={snr_lim:.2f} dB  (AWGN参考={snr_lim_awgn:.2f} dB)"
           + ("  [底板极限]" if is_floor else ""))
     print(f"SNR 扫频: [{snr_array[0]:.1f}, {snr_array[-1]:.1f}] dB  步进 0.5 dB")
     print(f"{'='*60}")
 
-    # 获取信源比特（每个码率只压缩一次，SNR 扫频复用同一份 tx_bits）
     tx_bits, ref_img, quality, actual_source_len = get_tx_bits(R)
     print(f"  [信源] AV1 Quality={quality}  K={K}  压缩后比特数={actual_source_len}")
 
-    # ── 加扰：在发送端对 tx_bits 做 XOR 扰码 ──────────────────
-    # 目的：打散 padding 0 区域的全零序列，消除 LDPC 全零陷阱
     tx_bits_scrambled = scramble(tx_bits)
-
-    # 预计算参考图张量（用于 MS-SSIM 计算）
     t_ref = img_to_tensor(ref_img) if ref_img is not None else None
-
-    # 转为 MATLAB 可接受的类型（传入加扰后的比特）
     tx_bits_ml = matlab.int32(tx_bits_scrambled.tolist())
 
     snr_list        = []
     ssim_list       = []
     cliff_reported  = False
     saved_this_rate = False
-    y_max           = 0.0   # 将由首次 ber==0 时的实测 MS-SSIM 填充
+    y_max           = 0.0
 
     for snr in snr_array:
-        # ── 调用 OFDM 物理层 worker ──────────────────────────────
-        ber, rx_bits_ml = eng.sim_ofdm_worker(tx_bits_ml, float(R), float(G), float(snr),
-                                              nargout=2)
+        # ── 调用 OFDM 物理层 worker（补齐 channelModel 和 delaySpread）──
+        ber, rx_bits_ml = eng.sim_ofdm_worker(
+            tx_bits_ml, float(R), float(G), float(snr),
+            CHANNEL_MODEL, float(DELAY_SPREAD),
+            nargout=2
+        )
         ber = float(ber)
 
         if ber > 0:
-            # AVIF 容器可能已损坏，直接置 0，不尝试解码
             y = 0.0
         else:
-            # ber == 0：比特完全正确，先解扰再尝试图像恢复
             rx_bits_np = np.array(rx_bits_ml, dtype=np.int32).flatten()
-
-            # ── 解扰：还原原始信源比特 ────────────────────────────
             rx_bits_np = descramble(rx_bits_np)
 
-            # 转为 uint8 并打包为字节流
             rx_bits_u8 = rx_bits_np.astype(np.uint8)
-            # 确保比特长度是 8 的倍数
             n_bits     = (len(rx_bits_u8) // 8) * 8
             rx_bits_u8 = rx_bits_u8[:n_bits]
             rx_bytes   = np.packbits(rx_bits_u8).tobytes()
@@ -327,13 +318,11 @@ for R in valid_rates:
                     t_rec = img_to_tensor(img_rec)
                     y = ms_ssim(t_ref, t_rec, data_range=1.0, size_average=True).item()
                 else:
-                    y = 1.0  # 随机比特模式无参考图，直接置满分
+                    y = 1.0
 
-                # 更新 y_max（取所有 ber==0 点中的最大值）
                 if y > y_max:
                     y_max = y
 
-                # 仅在首次达成 ber==0 时存图
                 if not saved_this_rate and ref_img is not None:
                     rate_tag  = f"R{format_rate_file(R)}"
                     snr_tag   = f"{snr:.1f}"
@@ -349,7 +338,7 @@ for R in valid_rates:
 
             if not cliff_reported and y > 0:
                 print(f"  [报捷] 码率={frac_str} | bpp={bpp:.4f} | "
-                      f"TDL-C容量极限={snr_lim:.2f} dB | "
+                      f"[当前信道容量极限]={snr_lim:.2f} dB | "
                       f"AWGN参考={snr_lim_awgn:.2f} dB | "
                       f"临界SNR={snr:.1f} dB | "
                       f"Quality={quality} | "
@@ -369,17 +358,19 @@ for R in valid_rates:
 print("\n仿真结束，MATLAB Engine 仍在后台待命。")
 
 # ─────────────────────────────────────────────────────────────
-# 数据落盘：将仿真结果序列化为 pickle 文件
+# 数据落盘
 # ─────────────────────────────────────────────────────────────
 timestamp_str = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 pkl_filename  = f"sim_av1_ofdm_data_{timestamp_str}.pkl"
 pkl_path      = os.path.join(WORKER_DIR, pkl_filename)
 
 payload = {
-    'valid_rates': valid_rates,
-    'results':     results,
-    'G':           G,
-    'timestamp':   timestamp_str,
+    'valid_rates':    valid_rates,
+    'results':        results,
+    'G':              G,
+    'timestamp':      timestamp_str,
+    'channel_model':  CHANNEL_MODEL,
+    'delay_spread':   DELAY_SPREAD,
 }
 
 with open(pkl_path, 'wb') as f:

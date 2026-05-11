@@ -1,5 +1,5 @@
 """
-plot_results_envelope.py  —  自适应码率性能上限（包络线）可视化 [OFDM + TDL-C 版]
+plot_results_envelope.py  —  自适应码率性能上限（包络线）可视化 [OFDM 版]
 从最新的 sim_av1_ofdm_data_*.pkl 存档中读取仿真数据，绘制各码率曲线及其包络线。
 
 使用方法：
@@ -26,7 +26,7 @@ ONLY_ORIGINAL_CLIFF = True
 
 # 【路径配置】
 # 自动匹配最新的 OFDM 仿真 pkl 存档
-PKL_PATTERN        = 'sim_av1_ofdm_data_20260509_172453.pkl'
+PKL_PATTERN        = 'sim_av1_ofdm_data_20260511_111526.pkl'
 PARTNER_EXCEL_PATH = '../NTSCC-fixCBR-SNR-SSIM.xlsx'  # Excel 文件放在 Semantic_Debug 根目录
 
 # ─────────────────────────────────────────────────────────────
@@ -189,7 +189,7 @@ ax.set_title('AV1 Performance @ Different LDPC rates (OFDM + TDL-C)', fontsize=1
 ax.legend(fontsize=9, loc='upper left')
 ax.grid(True, alpha=0.35)
 ax.set_ylim(-0.05, 1.05)
-ax.set_xlim(global_min_snr - 0.5, global_max_snr + 0.5)
+ax.set_xlim(global_min_snr - 7.5, global_max_snr + 0.5)
 
 # 独立前缀（ofdm 标识），避免覆盖 AWGN 的结果
 if ONLY_ORIGINAL_CLIFF:

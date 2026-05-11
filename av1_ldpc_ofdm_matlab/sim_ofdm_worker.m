@@ -1,16 +1,20 @@
-function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
-% sim_ofdm_worker  供 Python matlabengine 调用的 OFDM + TDL-C 物理层函数
+function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB, channelModel, delaySpread)
+% sim_ofdm_worker  供 Python matlabengine 调用的 OFDM 物理层函数
 %
-% 信道模型：5G NR OFDM + TDL-C 多径衰落信道
+% 信道模型：由 channelModel 参数决定
+%   'AWGN'  — 纯加性高斯白噪声，跳过多径衰落
+%   'TDL-*' — 5G NR TDL 多径衰落信道（如 TDL-C、TDL-D）
 % 信道估计：完美信道估计（直接从无噪声接收网格计算 H = rxGrid_clean / txGrid）
-% 均衡方式：逐子载波 MMSE 均衡
-% LLR 加权：CSI scaling
+% 均衡方式：逐子载波 Unbiased MMSE 均衡
+% LLR 计算：等效噪声方差直接喂给 nrSymbolDemodulate，无需手动 CSI 加权
 %
 % 输入:
-%   tx_bits_py  - Python 传入的一维 0/1 数组 (K bits)
-%   R           - 信道编码码率 (e.g. 1/8)
-%   G           - 空口总比特数 (e.g. 786432)
-%   snr_dB      - 信噪比 (dB)
+%   tx_bits_py   - Python 传入的一维 0/1 数组 (K bits)
+%   R            - 信道编码码率 (e.g. 1/8)
+%   G            - 空口总比特数 (e.g. 786432)
+%   snr_dB       - 信噪比 (dB)
+%   channelModel - 信道模型字符串，如 'AWGN'、'TDL-C'、'TDL-D'
+%   delaySpread  - 时延扩展 (秒)，AWGN 时忽略，如 100e-9
 %
 % 输出:
 %   ber         - 误比特率 (0 表示无误码)
@@ -81,20 +85,26 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     ofdmInfo   = nrOFDMInfo(carrier);
     sampleRate = ofdmInfo.SampleRate;
 
-    % ── TDL-C 信道（多普勒归零，建立完美块衰落）─────────────
-    % MaximumDopplerShift=0：信道在整个传输时长内绝对恒定，
-    % 消除 ICI 和信道老化，建立理想块衰落（Block Fading）上限。
-    channel = nrTDLChannel;
-    channel.DelayProfile        = 'TDL-C';
-    channel.DelaySpread         = 100e-9;
-    channel.MaximumDopplerShift = 0;       % 绝对静止，消除多普勒
-    channel.SampleRate          = sampleRate;
-    channel.NumTransmitAntennas = 1;
-    channel.NumReceiveAntennas  = 1;
-    reset(channel);
+    % ── 信道传播 ──────────────────────────────────────────────
+    if strcmp(channelModel, 'AWGN')
+        % AWGN 直通：跳过多径衰落，时域波形不变
+        rxWaveform_faded = txWaveform;
+    else
+        % TDL-* 多径衰落信道
+        % MaximumDopplerShift=0：信道在整个传输时长内绝对恒定，
+        % 消除 ICI 和信道老化，建立理想块衰落（Block Fading）上限。
+        channel = nrTDLChannel;
+        channel.DelayProfile        = channelModel;   % 如 'TDL-C'、'TDL-D'
+        channel.DelaySpread         = delaySpread;    % 如 100e-9
+        channel.MaximumDopplerShift = 0;              % 绝对静止，消除多普勒
+        channel.SampleRate          = sampleRate;
+        channel.NumTransmitAntennas = 1;
+        channel.NumReceiveAntennas  = 1;
+        reset(channel);
 
-    % 只通过信道一次，得到衰落后的时域波形
-    rxWaveform_faded = channel(txWaveform);
+        % 只通过信道一次，得到衰落后的时域波形
+        rxWaveform_faded = channel(txWaveform);
+    end
 
     % ── 步骤1：建立绝对底噪基准（发端对齐）──────────────────
     % 发射端 QPSK 符号能量期望 = 1.0（nrSymbolModulate 归一化输出）
@@ -115,30 +125,40 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     rxWaveform_noisy = rxWaveform_faded + noise_time;
 
     % ── 步骤3：解调出纯净网格和含噪网格 ──────────────────────
-    rxGrid_clean = nrOFDMDemodulate(carrier, rxWaveform_faded);
     rxGrid_noisy = nrOFDMDemodulate(carrier, rxWaveform_noisy);
 
-    nCols_clean  = size(rxGrid_clean, 2);
-    nCols_use    = min(nCols_clean, numOFDMSym);
+    % ── 完美信道估计 ──────────────────────────────────────────
+    if strcmp(channelModel, 'AWGN')
+        % AWGN：无多径失真，H 恒为全1矩阵
+        nCols_noisy  = size(rxGrid_noisy, 2);
+        nCols_use    = min(nCols_noisy, numOFDMSym);
+        H_perfect    = ones(numDataSC, nCols_use);
+    else
+        % TDL-*：从无噪声接收网格提取完美 H
+        rxGrid_clean = nrOFDMDemodulate(carrier, rxWaveform_faded);
 
-    txGrid_2d       = txGrid(:, 1:nCols_use, 1);
-    rxGrid_clean_2d = rxGrid_clean(:, 1:nCols_use, 1);
+        nCols_clean  = size(rxGrid_clean, 2);
+        nCols_use    = min(nCols_clean, numOFDMSym);
 
-    % ── 步骤4：提取有效数据的 Mask ────────────────────────────
-    nonzero_mask = abs(txGrid_2d) > 1e-10;
-    % noiseVar 已在步骤1确定，无需从接收信号反推，直接用于后续均衡
+        txGrid_2d       = txGrid(:, 1:nCols_use, 1);
+        rxGrid_clean_2d = rxGrid_clean(:, 1:nCols_use, 1);
 
-    % ── 完美信道估计：H = rxGrid_clean / txGrid ───────────────
-    H_perfect    = zeros(numDataSC, nCols_use);
-    H_perfect(nonzero_mask) = rxGrid_clean_2d(nonzero_mask) ./ txGrid_2d(nonzero_mask);
+        % ── 步骤4：提取有效数据的 Mask ────────────────────────────
+        nonzero_mask = abs(txGrid_2d) > 1e-10;
+        % noiseVar 已在步骤1确定，无需从接收信号反推，直接用于后续均衡
 
-    % 对补零列用前一列 H 填充
-    for col = 1:nCols_use
-        zero_sc = ~nonzero_mask(:, col);
-        if any(zero_sc) && col > 1
-            H_perfect(zero_sc, col) = H_perfect(zero_sc, col-1);
-        elseif any(zero_sc) && col == 1
-            H_perfect(zero_sc, col) = 1.0;
+        % ── 完美信道估计：H = rxGrid_clean / txGrid ───────────────
+        H_perfect    = zeros(numDataSC, nCols_use);
+        H_perfect(nonzero_mask) = rxGrid_clean_2d(nonzero_mask) ./ txGrid_2d(nonzero_mask);
+
+        % 对补零列用前一列 H 填充
+        for col = 1:nCols_use
+            zero_sc = ~nonzero_mask(:, col);
+            if any(zero_sc) && col > 1
+                H_perfect(zero_sc, col) = H_perfect(zero_sc, col-1);
+            elseif any(zero_sc) && col == 1
+                H_perfect(zero_sc, col) = 1.0;
+            end
         end
     end
 
@@ -149,29 +169,43 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     rxGrid_2d = rxGrid_noisy(:, 1:nCols_eq, 1);
     H_eq      = H_perfect(:, 1:nCols_eq);
 
-    % MMSE 权重：W = H* / (|H|² + noiseVar)
+    % ── Unbiased MMSE 均衡 ────────────────────────────────────
+    % 标准 MMSE 权重：W = H* / (|H|² + N0)
+    % 均衡后信号：y_eq = g * s + noise，其中等效增益 g = |H|² / (|H|² + N0)
+    % Unbiased 步骤：将 y_eq 除以 g，强行把振幅拉回 1.0
+    % 等效 SINR：gamma = g / (1 - g) = |H|² / N0
+    % 等效噪声方差：sigma²_eff = 1 / gamma = N0 / |H|²
     H_conj  = conj(H_eq);
     H_power = abs(H_eq).^2;
-    W_mmse  = H_conj ./ (H_power + noiseVar);
 
-    rxSym_eq = W_mmse .* rxGrid_2d;
+    % 等效增益 g = |H|² / (|H|² + N0)，范围 (0, 1)
+    g_eff = H_power ./ (H_power + noiseVar);
 
-    % CSI = 后验 SINR = |H|² / noiseVar（用于 LLR 加权）
-    csi_grid = H_power / noiseVar;
+    % MMSE 均衡（有偏）
+    W_mmse   = H_conj ./ (H_power + noiseVar);
+    rxSym_biased = W_mmse .* rxGrid_2d;
+
+    % 消除偏置：除以 g_eff，振幅恢复为 1.0
+    % 对 g_eff 极小的子载波（深度衰落）做保护，避免除以零
+    g_safe   = max(g_eff, 1e-10);
+    rxSym_eq = rxSym_biased ./ g_safe;
+
+    % 等效噪声方差：sigma²_eff = (1 - g) / g = N0 / |H|²
+    % 此方差已天然包含信道可靠度信息，无需额外 CSI 加权
+    noiseVar_eff = (1 - g_eff) ./ g_safe;   % 与 N0 / |H|² 等价
 
     % ── 提取有效数据符号 ──────────────────────────────────────
-    rxSym_vec = reshape(rxSym_eq, [], 1);
-    csi_vec   = reshape(csi_grid, [], 1);
+    rxSym_vec      = reshape(rxSym_eq,      [], 1);
+    noiseVar_eff_v = reshape(noiseVar_eff,  [], 1);
 
     numSym_avail = min(numSym, length(rxSym_vec));
-    rxSym_vec    = rxSym_vec(1:numSym_avail);
-    csi_vec      = csi_vec(1:numSym_avail);
+    rxSym_vec      = rxSym_vec(1:numSym_avail);
+    noiseVar_eff_v = noiseVar_eff_v(1:numSym_avail);
 
     if numSym_avail < numSym
-        % 语义修复：补零兜底的符号对应位置 CSI 置 0（绝对不可信），
-        % 而非 1，避免将伪造符号当作高可靠信息送入 LDPC 解码器
-        rxSym_vec = [rxSym_vec; zeros(numSym - numSym_avail, 1)];
-        csi_vec   = [csi_vec;   zeros(numSym - numSym_avail, 1)];
+        % 补零兜底符号：等效噪声方差设为极大值，使 LLR 强制趋近于 0
+        rxSym_vec      = [rxSym_vec;      zeros(numSym - numSym_avail, 1)];
+        noiseVar_eff_v = [noiseVar_eff_v; 1e8 * ones(numSym - numSym_avail, 1)];
     end
 
     % ── 接收端符号级解交织 ────────────────────────────────────
@@ -181,17 +215,25 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     deintrlv_idx  = zeros(1, numSym);
     deintrlv_idx(intrlv_idx_rx) = 1:numSym;   % 反向索引
 
-    rxSym_vec = rxSym_vec(deintrlv_idx);   % 还原符号顺序
-    csi_vec   = csi_vec(deintrlv_idx);     % 同步还原 CSI 顺序
+    rxSym_vec      = rxSym_vec(deintrlv_idx);        % 还原符号顺序
+    noiseVar_eff_v = noiseVar_eff_v(deintrlv_idx);   % 同步还原噪声方差顺序
 
-    % ── QPSK 软解调 ────────────────────────────────────────────
-    % 使用 noiseVar=1，后续由 CSI scaling 控制软信息可靠性
-    rxLLR_sym = nrSymbolDemodulate(rxSym_vec, modType, 1);
-
-    % ── CSI 加权 ───────────────────────────────────────────────
-    % QPSK 每符号 2 bit，csi 扩展 2 倍
-    csi_expanded = repelem(csi_vec, 2);
-    rxLLR_scaled = rxLLR_sym .* csi_expanded;
+    % ── QPSK 软解调（Unbiased MMSE）──────────────────────────
+    % nrSymbolDemodulate 仅接受标量噪声方差，无法直接传入向量。
+    % 对于 QPSK（Gray 映射，归一化星座点 ±1/√2 + j·±1/√2），
+    % 最优 LLR 解析式为：
+    %   LLR_bit0 = 2*√2 * real(y) / sigma²_eff
+    %   LLR_bit1 = 2*√2 * imag(y) / sigma²_eff
+    % nrSymbolModulate 输出的 QPSK 星座点幅值为 1/√2，
+    % 因此判决边界处斜率因子 = 2 * (1/√2) / (1/2) = 2√2。
+    % 等价地：LLR = 2 * real/imag(y) / (sigma²_eff / √2 * √2)
+    % 简化后直接用 nrSymbolDemodulate 标量=1 再乘以 1/sigma²_eff 向量：
+    %   nrSymbolDemodulate(y, 'QPSK', 1) 输出 = 2√2 * real/imag(y)
+    %   再除以 sigma²_eff 即得正确 LLR。
+    llr_unit     = nrSymbolDemodulate(rxSym_vec, modType, 1);   % 假设 sigma²=1
+    % llr_unit 长度 = 2*numSym（每符号 2 bit），需将 noiseVar_eff_v 扩展 2 倍
+    noiseVar_eff_bits = repelem(noiseVar_eff_v, 2);
+    rxLLR_scaled = llr_unit ./ noiseVar_eff_bits;
 
     % ── 速率恢复 + LDPC 解码 ───────────────────────────────────
     raterec = nrRateRecoverLDPC(rxLLR_scaled, K, R, rv, modType, nlayers, C);
@@ -206,4 +248,3 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB)
     [~, ber] = biterr(txBits, rxBits);
     rx_bits  = int32(rxBits(:));
 end
-
