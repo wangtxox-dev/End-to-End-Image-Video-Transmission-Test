@@ -189,7 +189,7 @@ ax.set_title('AV1 Performance @ Different LDPC rates (OFDM + TDL-C)', fontsize=1
 ax.legend(fontsize=9, loc='upper left')
 ax.grid(True, alpha=0.35)
 ax.set_ylim(-0.05, 1.05)
-ax.set_xlim(global_min_snr - 7.5, global_max_snr + 0.5)
+ax.set_xlim(global_min_snr - 0.5, global_max_snr + 0.5)
 
 # 独立前缀（ofdm 标识），避免覆盖 AWGN 的结果
 if ONLY_ORIGINAL_CLIFF:
