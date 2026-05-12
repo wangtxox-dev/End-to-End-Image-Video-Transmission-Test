@@ -1,4 +1,4 @@
-function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB, channelModel, delaySpread)
+function [ber, rx_bits, H_energy] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB, channelModel, delaySpread)
 % sim_ofdm_worker  供 Python matlabengine 调用的 OFDM 物理层函数
 %
 % 信道模型：由 channelModel 参数决定
@@ -19,6 +19,7 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB, channelModel
 % 输出:
 %   ber         - 误比特率 (0 表示无误码)
 %   rx_bits     - 解码后的 K 个比特 (int32 列向量)
+%   H_energy    - 本次随机快照的真实平均信道能量 (AWGN 恒为 1.0)
 
     rng('shuffle');
 
@@ -56,8 +57,12 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB, channelModel
     % ── 发射端符号级交织 ──────────────────────────────────────
     % 固定种子 rng(42)，生成随机置换索引，打散符号顺序
     % 目的：将连片深度衰落分散到不同 LDPC 码字位置，增强纠错能力
+    % 【RNG 隔离】保存当前全局 RNG 状态，用完后立即恢复，
+    % 防止 rng(42) 污染后续信道生成所需的随机流。
+    rng_state_saved = rng();   % 保存全局 RNG 快照
     rng(42);
     intrlv_idx = randperm(numSym);
+    rng(rng_state_saved);      % 立即恢复，全局随机流不受影响
     txSym_intrlv = txSym(intrlv_idx);   % 打乱后的符号序列
 
     % ── OFDM 配置 ─────────────────────────────────────────────
@@ -100,7 +105,14 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB, channelModel
         channel.SampleRate          = sampleRate;
         channel.NumTransmitAntennas = 1;
         channel.NumReceiveAntennas  = 1;
-        reset(channel);
+        % 【关键修复】使用全局随机流而非对象内部固定状态。
+        % reset(channel) 会将信道对象的内部 RNG 重置到确定性初始值，
+        % 导致每次调用产生完全相同的衰落系数（H_energy 永远是 1.4714）。
+        % 改为 'Global stream' 后，信道从 MATLAB 全局随机流取随机数，
+        % 而全局流已在函数入口由 rng('shuffle') 随机化，
+        % 从而保证每次快照得到真正独立的随机衰落系数。
+        channel.RandomStream = 'Global stream';
+        % 不调用 reset(channel)，避免锁死内部随机状态
 
         % 只通过信道一次，得到衰落后的时域波形
         rxWaveform_faded = channel(txWaveform);
@@ -210,8 +222,11 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB, channelModel
 
     % ── 接收端符号级解交织 ────────────────────────────────────
     % 使用完全相同的种子 rng(42) 重建置换索引，计算反向索引还原原始顺序
+    % 【RNG 隔离】同样保存/恢复全局状态，确保解交织不污染后续随机流。
+    rng_state_saved2 = rng();   % 保存全局 RNG 快照
     rng(42);
     intrlv_idx_rx = randperm(numSym);
+    rng(rng_state_saved2);      % 立即恢复
     deintrlv_idx  = zeros(1, numSym);
     deintrlv_idx(intrlv_idx_rx) = 1:numSym;   % 反向索引
 
@@ -247,4 +262,11 @@ function [ber, rx_bits] = sim_ofdm_worker(tx_bits_py, R, G, snr_dB, channelModel
     % ── 性能统计 ───────────────────────────────────────────────
     [~, ber] = biterr(txBits, rxBits);
     rx_bits  = int32(rxBits(:));
+
+    % 提取本次随机快照的真实平均能量
+    if strcmp(channelModel, 'AWGN')
+        H_energy = 1.0;
+    else
+        H_energy = mean(abs(H_perfect).^2, 'all');
+    end
 end

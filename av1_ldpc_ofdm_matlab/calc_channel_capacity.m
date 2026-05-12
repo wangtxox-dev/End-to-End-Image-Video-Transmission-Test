@@ -48,13 +48,15 @@ function C = calc_channel_capacity(snr_dB, channelModel, delaySpread)
     channel.SampleRate          = sampleRate;
     channel.NumTransmitAntennas = 1;
     channel.NumReceiveAntennas  = 1;
+    channel.RandomStream = 'mt19937ar with seed'; % 【新增】配置独立随机数流
 
     % ── 蒙特卡洛主循环 ──────────────────────────────────────────
     cap_accum = 0.0;
 
     for mc = 1:numMC
-        % 每次重置信道，获得独立衰落实现
-        reset(channel);
+        % 强制释放对象并更改种子，确保每次获得绝对独立的衰落实现
+        release(channel);
+        channel.Seed = mc;
 
         % OFDM 调制参考波形
         txWaveform = nrOFDMModulate(carrier, txGrid_ref);

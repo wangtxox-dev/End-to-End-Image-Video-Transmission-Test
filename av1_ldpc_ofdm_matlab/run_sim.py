@@ -287,7 +287,7 @@ for R in valid_rates:
         scan_start  = snr_lim_awgn                  # 降级：AWGN 极限作为物理保底起点
 
     # ── 动态扫频：统一从 scan_start 起步，覆盖 6 dB 窗口 ──────
-    snr_array = np.arange(scan_start, scan_start + 6, 0.5)
+    snr_array = np.arange(scan_start - 5, scan_start + 6, 0.5)
 
     frac_str = format_rate(R)
     print(f"{'='*60}")
@@ -312,12 +312,17 @@ for R in valid_rates:
 
     for snr in snr_array:
         # ── 调用 OFDM 物理层 worker（补齐 channelModel 和 delaySpread）──
-        ber, rx_bits_ml = eng.sim_ofdm_worker(
+        ber, rx_bits_ml, H_energy_ml = eng.sim_ofdm_worker(
             tx_bits_ml, float(R), float(G), float(snr),
             CHANNEL_MODEL, float(DELAY_SPREAD),
-            nargout=2
+            nargout=3
         )
-        ber = float(ber)
+        ber      = float(ber)
+        H_energy = float(H_energy_ml)                          # 本次快照真实平均信道能量
+        # 等效物理 SNR = 标称 SNR + 10*log10(H_energy)
+        # H_energy > 1 → 信道"赏饭"，等效 SNR 高于标称；< 1 → 信道"扣饭"
+        H_energy_dB  = 10.0 * np.log10(H_energy) if H_energy > 0 else float('-inf')
+        equiv_snr_dB = snr + H_energy_dB
 
         if ber > 0:
             y = 0.0
@@ -361,11 +366,15 @@ for R in valid_rates:
                       f"临界SNR={snr:.1f} dB | "
                       f"Quality={quality} | "
                       f"实测 MS-SSIM={y:.6f}")
+                print(f"         ↳ 实测信道能量 H_energy={H_energy:.6f} ({H_energy_dB:+.3f} dB) | "
+                      f"等效物理SNR={equiv_snr_dB:.2f} dB ")
                 cliff_reported = True
 
         snr_list.append(snr)
         ssim_list.append(y)
-        print(f"  SNR={snr:+6.1f} dB | BER={ber:.2e} | MS-SSIM={y:.4f}")
+        print(f"  SNR={snr:+6.1f} dB | BER={ber:.2e} | MS-SSIM={y:.4f} | "
+              f"H_energy={H_energy:.4f} ({H_energy_dB:+.2f} dB) | "
+              f"Equiv_SNR={equiv_snr_dB:.2f} dB")
 
     results[R] = {'snr_list': snr_list, 'ssim_list': ssim_list,
                   'snr_lim': snr_lim,           # float 或 None（降级时）
