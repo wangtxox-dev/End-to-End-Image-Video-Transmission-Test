@@ -30,9 +30,9 @@ G            = 768 * 512 * 2          # 空口总比特数 786432（与 run_sim.
 R            = 1 / 4                  # 码率 1/4 → K = 196608 bits
 K            = int(G * R)             # 信源比特数
 SNR_DB       = 0.0                    # 固定 0 dB
-CHANNEL_TYPE = "TDL-C"
-DELAY_SPREAD = 100e-9                 # 100 ns
-NUM_TRIALS   = 500
+CHANNEL_TYPE = "TDL-A"
+DELAY_SPREAD = 500e-9                 # 100 ns
+NUM_TRIALS   = 200
 
 # ANSI 颜色码
 _RED    = "\033[91m"
